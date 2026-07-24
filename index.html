@@ -86,6 +86,12 @@ main{max-width:760px; margin:0 auto; padding:16px;}
 .choice-btn.wrong{ background:var(--bad); color:#fff; border-color:var(--bad); }
 .choice-btn.dim{ opacity:.55; }
 .choice-btn:disabled{ cursor:default; }
+.idk-btn{
+  width:100%; margin-top:4px; padding:11px 14px; border-radius:12px; border:1.5px dashed var(--sub);
+  background:transparent; color:var(--sub); font-size:.86rem; cursor:pointer; font-weight:600;
+}
+.idk-btn:hover{ color:var(--text); border-color:var(--text); }
+.idk-btn:disabled{ cursor:default; opacity:.4; }
 .explain{
   margin-top:14px; padding-top:12px; border-top:1px dashed var(--border);
   font-size:.86rem; color:var(--sub); display:none;
@@ -134,6 +140,7 @@ footer{text-align:center; color:var(--sub); font-size:.7rem; margin-top:30px; pa
   <div class="toolbar">
     <div class="toolbar-group">
       <button class="mini-btn" id="mode-toggle">📇 出題モード</button>
+      <button class="mini-btn on" id="priority-toggle">🎯 優先出題</button>
       <button class="mini-btn" id="shuffle-toggle">🔀 シャッフル</button>
       <button class="mini-btn" id="review-toggle">⭐ 苦手のみ</button>
     </div>
@@ -157,6 +164,7 @@ footer{text-align:center; color:var(--sub); font-size:.7rem; margin-top:30px; pa
       </div>
       <div class="q-text" id="q-text">読み込み中...</div>
       <div class="choices" id="choices"></div>
+      <button class="idk-btn" id="btn-idk">🤷 わからない（答えを見る）｜キー：0</button>
       <div class="explain" id="explain"></div>
     </div>
 
@@ -184,18 +192,41 @@ if (!window.QUIZ_DATA) {
 const LECTURE_TITLES = window.LECTURE_TITLES;
 const QUIZ_DATA = window.QUIZ_DATA;
 
-const STORAGE_KEY = "pe_quiz_progress_mc_v2";
+const STORAGE_KEY = "pe_quiz_progress_mc_v3";
 let progress = loadProgress();
 const ALL_LECTURES = Object.keys(QUIZ_DATA).map(Number).sort((a,b)=>a-b);
 
-let state = { lecture: 1, order: [], pos: 0, mode: 'card', shuffle: false, reviewOnly: false, query: "", answered: false };
+let state = { lecture: 1, order: [], pos: 0, mode: 'card', shuffle: false, reviewOnly: false, priority: true, query: "", answered: false };
 
 function loadProgress(){
-  try{ const raw = localStorage.getItem(STORAGE_KEY); if(raw) return JSON.parse(raw); }catch(e){}
+  try{
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if(raw) return JSON.parse(raw);
+  }catch(e){}
+  // migrate from older flat-string format if present
+  try{
+    const old = localStorage.getItem("pe_quiz_progress_mc_v2");
+    if(old){
+      const oldObj = JSON.parse(old);
+      const migrated = {};
+      Object.keys(oldObj).forEach(k=>{
+        migrated[k] = { status: oldObj[k], count: 1 };
+      });
+      return migrated;
+    }
+  }catch(e){}
   return {};
 }
 function saveProgress(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(progress)); }
-function statusOf(lec, idx){ return progress[lec+"-"+idx] || null; }
+function entryOf(lec, idx){ return progress[lec+"-"+idx] || null; }
+function statusOf(lec, idx){ const e = entryOf(lec, idx); return e ? e.status : null; }
+function countOf(lec, idx){ const e = entryOf(lec, idx); return e ? (e.count||0) : 0; }
+function recordAnswer(lec, idx, status){
+  const key = lec+"-"+idx;
+  const prevCount = countOf(lec, idx);
+  progress[key] = { status: status, count: prevCount + 1 };
+  saveProgress();
+}
 
 const tabsEl = document.getElementById('tabs');
 const lectureTitleEl = document.getElementById('lecture-title');
@@ -226,11 +257,19 @@ function buildOrder(){
         if(!s.includes(state.query.toLowerCase())) return;
       }
       if(state.reviewOnly){ if(statusOf(lec, idx) !== 'again') return; }
-      list.push({lec, idx});
+      list.push({lec, idx, count: countOf(lec, idx)});
     });
   });
   if(state.shuffle){
     for(let i=list.length-1;i>0;i--){ const j = Math.floor(Math.random()*(i+1)); [list[i], list[j]] = [list[j], list[i]]; }
+  }
+  if(state.priority){
+    // stable-sort by attempt count ascending (never-attempted first),
+    // preserving shuffle/original relative order within the same count
+    list = list
+      .map((item, originalIndex)=>({item, originalIndex}))
+      .sort((a,b)=> (a.item.count - b.item.count) || (a.originalIndex - b.originalIndex))
+      .map(x=>x.item);
   }
   state.order = list;
   state.pos = 0;
@@ -238,6 +277,7 @@ function buildOrder(){
 
 const qText = document.getElementById('q-text');
 const choicesEl = document.getElementById('choices');
+const btnIdk = document.getElementById('btn-idk');
 const explainEl = document.getElementById('explain');
 const typeBadge = document.getElementById('type-badge');
 const cardIndex = document.getElementById('card-index');
@@ -290,6 +330,9 @@ function renderCard(){
     btn.onclick = ()=> selectChoice(lec, idx, item, ci, btn);
     choicesEl.appendChild(btn);
   });
+
+  btnIdk.disabled = false;
+  btnIdk.onclick = ()=> selectIdk(lec, idx, item);
 }
 
 function selectChoice(lec, idx, item, choiceIndex, btnEl){
@@ -303,12 +346,31 @@ function selectChoice(lec, idx, item, choiceIndex, btnEl){
     else if(i === choiceIndex) b.classList.add('wrong');
     else b.classList.add('dim');
   });
+  btnIdk.disabled = true;
   const isCorrect = (choiceIndex === correct);
-  progress[lec+"-"+idx] = isCorrect ? 'good' : 'again';
-  saveProgress();
+  recordAnswer(lec, idx, isCorrect ? 'good' : 'again');
   explainEl.classList.add('show');
   const catLabel = CAT_LABEL[item.category] || '';
   explainEl.innerHTML = (isCorrect ? "✅ 正解！" : "❌ 不正解。") + " 正しい内容：<b>" + item.answer + "</b>" +
+    (catLabel ? '<div class="cat-tag">分類：' + catLabel + '</div>' : '');
+  updateStats();
+}
+
+function selectIdk(lec, idx, item){
+  if(state.answered) return;
+  state.answered = true;
+  const correct = item.correct;
+  const buttons = Array.from(choicesEl.children);
+  buttons.forEach((b, i)=>{
+    b.disabled = true;
+    if(i === correct) b.classList.add('correct');
+    else b.classList.add('dim');
+  });
+  btnIdk.disabled = true;
+  recordAnswer(lec, idx, 'again');
+  explainEl.classList.add('show');
+  const catLabel = CAT_LABEL[item.category] || '';
+  explainEl.innerHTML = "🤷 わからない — 正しい内容：<b>" + item.answer + "</b>" +
     (catLabel ? '<div class="cat-tag">分類：' + catLabel + '</div>' : '');
   updateStats();
 }
@@ -324,11 +386,12 @@ function renderList(){
     const div = document.createElement('div');
     div.className = 'list-item';
     const st = statusOf(lec, idx);
+    const cnt = countOf(lec, idx);
     const mark = st === 'good' ? '✅' : st === 'again' ? '⭐' : '・';
     const promptLine = item.type === 'truefalse' ? item.statement : item.prompt;
     const choiceLine = "選択肢： " + item.choices.join(" / ");
     div.innerHTML = `
-      <div class="list-meta">第${lec}講 ${mark} ｜ ${TYPE_LABEL[item.type]}</div>
+      <div class="list-meta">第${lec}講 ${mark} ｜ ${TYPE_LABEL[item.type]} ｜ 挑戦回数 ${cnt}</div>
       <div class="list-q">Q. ${promptLine}</div>
       <div class="list-q" style="font-weight:400;color:var(--sub);font-size:.82rem;">${choiceLine}</div>
       <div class="list-a">A. ${item.answer}</div>
@@ -349,7 +412,7 @@ function updateStats(){
     });
   });
   statText.textContent = `${state.order.length} 問中 ${state.order.length? state.pos+1 : 0} 問目`;
-  statDetail.textContent = `正答 ${good}｜誤答 ${again}｜未回答 ${unseen}（全 ${total} 問）`;
+  statDetail.textContent = `正答 ${good}｜誤答 ${again}｜未挑戦 ${unseen}（全 ${total} 問）`;
   progressInner.style.width = total ? ((good/total)*100)+'%' : '0%';
 }
 
@@ -373,6 +436,10 @@ document.getElementById('shuffle-toggle').onclick = (e)=>{
   state.shuffle = !state.shuffle; e.target.classList.toggle('on', state.shuffle);
   buildOrder(); render();
 };
+document.getElementById('priority-toggle').onclick = (e)=>{
+  state.priority = !state.priority; e.target.classList.toggle('on', state.priority);
+  buildOrder(); render();
+};
 document.getElementById('review-toggle').onclick = (e)=>{
   state.reviewOnly = !state.reviewOnly; e.target.classList.toggle('on', state.reviewOnly);
   buildOrder(); render();
@@ -394,7 +461,8 @@ document.addEventListener('keydown', (e)=>{
     const i = parseInt(e.key,10)-1;
     const btns = choicesEl.children;
     if(btns[i] && !state.answered) btns[i].click();
-  } else if(e.key === 'ArrowRight' || e.code === 'Space'){ e.preventDefault(); btnNext.click(); }
+  } else if(e.key === '0'){ if(!state.answered) btnIdk.click(); }
+  else if(e.key === 'ArrowRight' || e.code === 'Space'){ e.preventDefault(); btnNext.click(); }
   else if(e.key === 'ArrowLeft'){ document.getElementById('btn-prev').click(); }
 });
 
